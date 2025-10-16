@@ -1,0 +1,4 @@
+fastapi
+faiss-cpu
+langchain
+beautifulsoup4
