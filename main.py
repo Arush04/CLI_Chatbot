@@ -101,26 +101,106 @@ def get_weather_description(code: int) -> str:
     }
     return weather_codes.get(code, f"Weather code {code}")
 
+def tool_selector(user_query: str) -> tuple[str, str]:
+    """
+    Uses the LLM to classify the user's query into one of three categories (general, weather, both)
+    Returns: (tool_name, reasoning)
+    """
+    classification_prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+Classify the query into **exactly** one of the following categories:
+- weather: when asked about anything related to weather
+- general: when asked about anything but the weather
+- general+weather: when asked about weather and other information
+
+Respond in this **exact** format:
+Category: [category_name]
+Reason: [one short sentence explaining why]<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Query: What is Canonical?
+Category:<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+Category: general
+Reason: The query asks about a company/product, not weather.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Query: What's the weather in London?
+Category:<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+Category: weather
+Reason: The query explicitly asks about weather conditions.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Query: What is Canonical and how is the weather in London?
+Category:<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+Category: general+weather
+Reason: The query asks about both company information and weather.<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Query: {user_query}
+Category:<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+"""
+
+    output = pipeline(
+        classification_prompt,
+        max_new_tokens=50,
+        do_sample=False,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+
+    full_output = output[0]["generated_text"][len(classification_prompt):].strip()
+
+    category = "general"
+    reason = "No classification found"
+
+    # Extract category
+    category_match = re.search(r"Category:\s*(general\+weather|weather|general)", full_output, re.IGNORECASE)
+    if category_match:
+        category = category_match.group(1).lower()
+    else:
+        full_output_lower = full_output.lower()
+        if "general+weather" in full_output_lower or "general and weather" in full_output_lower:
+            category = "general+weather"
+        elif "weather" in full_output_lower:
+            category = "weather"
+        elif "general" in full_output_lower:
+            category = "general"
+
+    # Extract reason
+    reason_match = re.search(r"Reason:\s*(.+?)(?:\n|<|$)", full_output, re.IGNORECASE)
+    if reason_match:
+        reason = reason_match.group(1).strip()
+
+    return category, reason
+
+
 def agent_respond(user_query: str, vectorstore: Optional[object] = None) -> str:
     """
-    Combines vector DB and live data context, then generates response.
+    ReAct-style agent that:
+      1. Uses LLM-based `tool_selector` to decide which tools to use.
+      2. Collects only the required context.
+      3. Generates the final answer using the chosen context(s).
     """
-    context = ""
+    print("🔍 Selecting tools...")
+    selected_tool, reasoning = tool_selector(user_query)
+    print(f"Tool selected: {selected_tool}")
 
-    # Retrieve relevant docs from vector store
-    if vectorstore:
+    context = ""
+    weather_info = ""
+
+    # Retrieve from vectorstore if "general" or "general+weather"
+    if selected_tool in ["general", "general+weather"] and vectorstore:
         try:
             results = vectorstore.similarity_search(user_query, k=5)
             if results:
+                print("🧠 Getting data from knowledge base")
                 context += "\n\n--- Retrieved Knowledge ---\n"
                 for doc in results:
                     context += f"{doc.page_content}\n"
         except Exception as e:
             print(f"⚠️ Vector store error: {e}")
-    print(f"context >>>>>> {context}")
-    # Check for weather-related intent
-    weather_info = ""
-    if "weather" in user_query.lower():
+
+    # Get weather info if "weather" or "general+weather"
+    if selected_tool in ["weather", "general+weather"]:
         detected_city = None
         cities = ["Bangalore", "Delhi", "London", "New York", "Tokyo", "Toronto", "Mumbai", "Paris"]
 
@@ -130,12 +210,12 @@ def agent_respond(user_query: str, vectorstore: Optional[object] = None) -> str:
                 break
 
         if detected_city:
-            print(f"Fetching weather for {detected_city}...")
+            print(f"🌦️ Fetching weather for {detected_city}...")
             weather_info = get_weather(detected_city)
         else:
-            weather_info = "You asked about the weather, but I couldn't detect a specific city name."
+            weather_info = "Weather was requested, but no specific city name was detected."
 
-    # Build the prompt components
+    # System prompt
     system_prompt = """You are a helpful assistant. Follow these rules:
     1. Judge from the prompt if question can be answered with information from knowledge base or weather information or both. Below are some examples for your reference.
     Example:
@@ -145,50 +225,39 @@ def agent_respond(user_query: str, vectorstore: Optional[object] = None) -> str:
 
     Now answer the user's question using ONLY the context provided below. If no relevant context exists, say so."""
 
-    # user_content = f"""Question: {user_query}
-    # {f"Context from knowledge base:\n{context}" if context else ""}
-    # {f"Current weather information:\n{weather_info}" if weather_info else ""}
-    # IMPORTANT: Do not make up information or use context from somwhere but the provided context."""
+    # Include only the contexts relevant to the chosen tool(s)
     user_content = f"""
     Question: {user_query}
 
-    Below information contains retrieved knoweldge and weather information, summarize from this only:
-    {f"Context from knowledge base:\n{context}" if context else ""}
-    {f"Current weather information:\n{weather_info}" if weather_info else ""}
+    Below information contains retrieved knowledge and weather information (based on selected tools):
 
-    If relevant information is missing, respond: "Not found in retrieved knowledge."
+    {f"Context from knowledge base:\n{context}" if context and selected_tool in ['general', 'general+weather'] else ""}
+    {f"Current weather information:\n{weather_info}" if weather_info and selected_tool in ['weather', 'general+weather'] else ""}
     """
 
-
+    # Compose full prompt
     prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n{system_prompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{user_content}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
 
-    print(f"\nGenerating response...")
-
-    # Generate response
+    print("🧩 Generating final response...")
     output = pipeline(
-      prompt,
-      max_new_tokens=300,
-      do_sample=False,
-      temperature=None,
-      top_p=None,
-      repetition_penalty=1.1,
-      pad_token_id=tokenizer.eos_token_id,
-  )
+        prompt,
+        max_new_tokens=300,
+        do_sample=False,
+        temperature=None,
+        top_p=None,
+        repetition_penalty=1.1,
+        pad_token_id=tokenizer.eos_token_id,
+    )
 
-    # DEBUG: Print raw output
-    # print("RAW OUTPUT LENGTH:", len(output[0]["generated_text"]))
-    # print("PROMPT LENGTH:", len(prompt))
-    # print("NEW TOKENS GENERATED:", len(output[0]["generated_text"]) - len(prompt))
-
-    # Extract only the new generated text
+    # Extract generated text
     full_output = output[0]["generated_text"]
     response_text = full_output[len(prompt):].strip()
-
-    # Remove any end tokens and cleanup
     response_text = response_text.split("<|eot_id|>")[0].strip()
     response_text = response_text.split("<|end_of_text|>")[0].strip()
 
-    return response_text
+    # Add reasoning note
+    reasoning_note = f"\n\n[Agent Thought: The LLM decided to use '{selected_tool}' tool(s) because: {reasoning}]"
+    return response_text + reasoning_note
 
 
 if __name__ == "__main__":
