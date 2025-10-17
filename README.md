@@ -113,6 +113,28 @@ Install CLI_Chatbot using one of the following methods:
 
 <img width="1192" height="854" alt="Screenshot from 2025-10-16 22-33-18" src="https://github.com/user-attachments/assets/2c5f58e2-f82b-4977-b4dd-15dc8a88111d" />
 
+
+**Reasoning:**
+
+**LLM: Llama-3.2-3B-Instruct**
+- Selected for its efficient resource utilization, since I am running this application on colab this is the ideal fit.
+- Provides adequate performance for domain-specific Q&A when properly prompted and paired with good retrieved data.
+
+**Vector Database: ChromaDB**
+- Lightweight and easy to implement with minimal configurations, suitable for rapid prototyping.
+- Scaling of this application can be easy due to following advantages of Chromadb:
+  * Advanced search configurations (MMR, hybrid search, filtering)
+  * Custom ingestion pipelines and embedding strategies
+  * Flexible chunking methods (semantic, sliding window, recursive)
+  * Collection management and persistence options
+- Better retrieval quality directly improves LLM output by providing more relevant, focused context, reducing hallucinations and improving answer accuracy without requiring model upgrades
+
+**Tomorrow.io Weather API**
+
+- Offers forecast data, historical weather, and climate insights.
+- Free
+- Easy to integrate
+
 ---
 
 ### Trade-offs and Limitations 
